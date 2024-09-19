@@ -1,0 +1,623 @@
+---
+title: About1
+author: Tao He
+date: 2022-02-04
+category: Jekyll
+layout: post
+---
+
+
+# MySQL
+
+## 逻辑架构
+
+### Server层
+
+**连接器**
+
+- 负责跟客户端建立连接、获取权限、维持和管理连接
+- 长连接，连接时间由参数wait_timeout控制，默认值8小时
+- MySQL在执行过程中临时使用的内存是管理在连接对象里面的，这些资源在连接断开时才释放，如果长连接累积下来，可能导致内存占用太大，被系统强行杀掉
+  - 定期断开长连接
+  - MySQL 5.7或更新版本，通过执行mysql_reset_connection重新初始化连接资源
+
+**查询缓存**
+
+- 不建议使用，表每次有更新，其查询缓存都会失效
+- MySQL 8.0版本直接删掉了查询缓存模块
+
+**分析器**
+
+- 词法分析，MySQL处理输入的SQL语句，识别出select等关键字、表名、字段名等
+- 语法分析，判断SQL语句是否满足语法规则，不满足则抛出`You have an error in your SQL syntax`错误
+
+**优化器**
+
+- 决定使用哪个索引、决定各个表的连接顺序等
+- 优化完成后，SQL语句的执行方案就确定了
+
+**执行器**
+
+- 检查是否有执行权限，没有则报错
+- 调用引擎接口执行
+
+### 存储引擎
+
+- 负责数据的存储和提取
+- 插件式，支持InnoDB、MyISAM、Memory等多个存储引擎
+- InnoDB引擎在MySQL 5.5.5版本开始成为了默认存储引擎
+
+![img](https://static001.geekbang.org/resource/image/0d/d9/0d2070e8f84c4801adbfa03bda1f98d9.png)
+
+
+
+## 日志
+
+### redo log
+
+- WAL `Write-Ahead Logging`，先写日志，再写磁盘
+- InnoDB引擎特有
+- 物理日志，记录的是“在某个数据页上做了什么修改”，通过select @@datadir可查看redo log所在的目录
+- redo log循环写，write pos表示当前记录的位置，checkpoint为当前要擦除的位置，记录更新到数据文件后擦除，写满时需要将一部分记录写入数据文件，擦除一部分后再继续写
+- redo log先写内存redo log buffer，然后定时或事务提交时写入磁盘redo log文件，具体写入磁盘的机制通过`innodb_flush_log_at_trx_commit `参数进行配置
+- 节省了随机写磁盘的IO消耗，改为顺序写redo log
+
+![img](https://static001.geekbang.org/resource/image/b0/9c/b075250cad8d9f6c791a52b6a600f69c.jpg)
+
+### binlog
+
+- Server层日志，所有引擎都可以使用
+- 逻辑日志，记录的是这个语句的原始逻辑，比如“给ID=2这一行的c字段加1 ”
+- 追加写入，到一定文件大小后切换到下一个文件
+
+**在执行更新（insert, update, delete）操作时，都会用到redo log和binlog**
+
+**执行update时的流程：**
+
+1. 找到要更新的行，如果该行所在的数据页在内存中（MySQL在读取某行时，会将该行所在的数据页都读入内存），就直接返回给执行器；否则，需要先从磁盘读入内存，然后再返回
+2. 执行器拿到引擎给的行数据，执行更新操作，得到新的一行数据，再调用引擎接口写入这行新数据
+3. 引擎将这行新数据更新到内存中，同时将这个更新操作记录到redo log里面，此时redo log状态为prepare，然后告知执行器执行完成了，随时可以提交事务
+4. 执行器生成这个操作的binlog，并把binlog写入磁盘
+5. 执行器调用引擎的提交事务接口，引擎把刚刚写入的redo log改成提交commit状态，更新完成
+
+![img](https://static001.geekbang.org/resource/image/2e/be/2e5bff4910ec189fe1ee6e2ecc7b4bbe.png)
+
+### 两阶段提交
+
+**数据库崩溃后的数据恢复，redo log起了什么作用？**
+
+通过redo log实现两阶段提交，保证数据恢复的一致性
+
+**如果没有redo log，崩溃后做数据恢复**
+
+1.先更新数据文件，再写binlog，若更新完后崩溃，通过binlog恢复的数据少了
+
+2.先写binlog，再更新数据文件，若写binlog后崩溃，通过binlog恢复的数据多了
+
+**两阶段提交怎么保证数据恢复一致性**
+
+`节点1`
+
+- 写入redo log，状态为prepare
+
+`节点2`
+
+- 写binlog
+
+`节点3`
+
+- 事务提交，redo log为commit状态
+
+在以上三个节点中，如果任意一个发生异常
+
+节点1，redo log和binlog都没有记录，不会有任何影响
+
+节点2，redo log为prepare状态，重启数据库后检查binlog中是否有该条redo log的更新，发现没有，则丢弃此次redo log的变更
+
+节点3，redo log为prepare状态，重启数据库后检查binlog中是否有该条redo log的更新，发现有，则提交该事务
+
+
+
+## 索引
+
+### B+树
+
+**为什么使用B+树**
+
+- 可以范围查找
+- 二叉查找树可能退化成链表
+- 平衡二叉树需要维护高度平衡，代价太大
+- 红黑树也是二叉树，会导致树的深度太大，降低查找效率
+
+**数据量xxx，B+树会有多高？，B+树占用的存储空间**
+
+
+
+### 索引相关
+
+**普通索引（二级索引）**
+
+- 索引叶子节点上存储的是索引列与主键的值
+- 查找到主键的值后，再去主键所在的B+树上查找该行
+
+**主键索引**
+
+- 即聚簇索引，将数据与索引存储在一块的一种数据存储方式，一张表只能有一个聚簇索引
+- 如果没有定义主键，InnoDB会选择一个唯一的非空索引代替，如果没有这样的索引，则隐式定义一个主键作为聚簇索引
+- 叶子节点是数据页，数据页中有具体的记录
+- 从二级索引查找完后，再回到主键索引树中搜索，该过程称为**回表**
+- 主键索引树的叶子节点是按主键顺序排列的，所以插入数据时，需要找到其插入位置，如果是随机ID，插入到某个数据页时可能该页已经满了，则需要申请新的数据页然后挪动部分数据过去，造成**页分裂**
+- 页分裂后，一个数据页的内容分散到两个页中，空间利用率也降低了，当相邻两个数据页数据减少了，利用率很低之后，会进行页合并
+- 由此建议使用递增式主键，保证有序插入，每次insert都是追加操作，不触发页分裂与数据挪动
+
+**最左前缀匹配**
+
+假设一个索引是由a,b,c三列组成，其索引的内容则为a,b,c,主键四个字段，且按a,b,c,主键依次排序，依照这个设计，索引的命中遵循最左前缀匹配的原则，即从索引最左列开始查找
+
+- 如果某个列中有**范围查询**，则其右边所有列都无法使用索引
+- 索引列不能是表达式的一部分，或函数的参数，即需要为**独立的列**
+- 范围查找在字段不多的情况下可以用in来优化
+
+**索引的选择性**
+
+- 索引的选择性=不重复的索引值(基数)/表记录总数
+- 选择性越高代表能过滤掉的数据行越多，查询效率越高，很明显唯一索引的选择性=1
+- 当不需要考虑分组和排序时，推荐将选择性最高的列放在前面
+
+**前缀索引**
+
+对于BLOB、TEXT或VARCHAR长度很长的列，必须使用前缀索引，即用字段的前几个字符作为索引
+
+- `alter table t1 add key (col_name(7))` 创建前缀索引
+- 前缀长度的选择通过前缀选择性来判断，尽量保证前缀的选择性接近完整列的选择性，且前缀长度不要过长
+- 前缀索引因为截断了字段，所以无法使用覆盖索引，即使定义的长度包含了整个字段，但是MySQL并不知道定义的前缀索引是否截断了完整的字段
+
+**覆盖索引**
+
+如果一个索引覆盖了所有需要查询字段的值，则称之为覆盖索引，覆盖索引因为无需再回表，可以显著提升查询性能，所有尽量使用覆盖索引
+
+**Hash索引**
+
+// TODO 
+
+- 只有MyISAM直接支持hash索引
+
+**索引用作排序**
+
+- 只有当索引的列顺序与order by子句的顺序完全一致，MySQL才能使用索引来对结果排序
+- 联表查询时，order by使用的字段全部为第一个表时，才可以使用索引排序
+- 当前导列为常量时，order by子句可以不满足索引最左前缀的要求
+
+**索引失效**
+
+- 违反最左前缀匹配原则
+- 在索引上做计算、表达式、函数等操作
+- 范围查询后边的索引列会失效
+- 列的编码不一致
+- 使用了or可能不走索引，因为优化器觉得全表扫描更快
+- 索引值太少（重复数据太多），优化器觉得全表扫描更快
+- 扫描行数超过17%，走全表扫描（未实验过，待确认）
+
+### 唯一索引与普通索引
+
+**change buffer**
+
+在更新索引数据时，如果数据所在的页已经在内存中了，则直接更新，若不在内存中，InnoDB会先将更新操作写进change buffer，随后再将change buffer的内容merge到数据页上，省去将数据页读入内存的操作
+
+- change buffer占用buffer pool里的内存，通过`innodb_change_buffer_max_size`参数配置
+- 在访问change buffer涉及的数据页时会进行merge、后台线程定期merge、数据库关闭时也会merge
+- 普通索引才能使用change buffer
+- 如果写完马上又要读，不适合使用change buffer，反而增加了维护change buffer的代价
+- 节省随机读磁盘的消耗
+
+**查询过程**，如select * from t1 where k=5;
+
+- 普通索引，找到满足条件的记录后，需要继续遍历下一个记录，直到碰到第一个k != 5的记录
+- 唯一索引，找到满足条件的记录，则停止继续搜索
+- 性能差距其实微乎其微
+
+**更新过程**
+
+唯一索引每次更新操作都要先判断是否违反唯一性规则，所以必须将记录所在的页读入内存
+
+- 要更新的记录在内存中
+  - 普通索引，直接更新，结束
+  - 唯一索引，判断一下更新语句是否违反唯一性约束，更新，结束
+  - 性能没什么差距，只是多个判断
+- 更新的记录不在内存中
+  - 普通索引，将更新记录在change buffer中，结束
+  - 唯一索引，读入数据页，判断冲突，更新，结束
+  - **使用普通索引性能更优**
+
+
+
+
+
+
+
+
+
+## MVCC与锁
+
+### 隔离级别
+
+**并发问题**
+
+- `脏读`，读取到了其他事务中未提交的数据
+- `不可重复读`，A事务多次读取同一数据，期间B事务对数据进行了更新，导致A事务读取到的数据前后不一致
+- `幻读`，A事务多次读取同一数据，期间B事务对数据进行了插入或删除，导致A事务读取到的数据前后不一致
+
+**隔离级别**
+
+可重复读（rr）是MySQL的默认隔离级别
+
+| 隔离级别\可能出现的并发问题     | 脏读 | 不可重复读 | 幻读 |
+| ------------------------------- | ---- | ---------- | ---- |
+| 读未提交 read uncommitted（ru） | √    | √          | √    |
+| 读已提交 read committed （rc）  | ×    | √          | √    |
+| 可重复读 repeatable read（rr）  | ×    | ×          | √    |
+| 串行化 serializable             | ×    | ×          | ×    |
+
+### 多版本并发控制(MVCC)
+
+#### 隐藏列
+
+MySQL的每行记录都有中都有隐藏列，其中跟MVCC有关的隐藏列有：
+
+- `DATA_TRX_ID`，  记录insert或最近更新这条行记录的事务ID，6字节
+- `DB_ROLL_PTR`，回滚指针，指向当前数据行的回滚数据undo log，7字节
+
+#### undo log
+
+MySQL在更新一条记录时都会记录一条回滚操作，即undo log，记录undo log的过程为：
+
+- 对行记录加排他锁
+- 把该行拷贝到undo log中，`DB_TRX_ID`和`DB_ROLL_PTR`都不动
+- 对该行执行更新操作产生一个新版本，更新`DATA_TRX_ID`为修改记录的事务ID ，将`DATA_ROLL_PTR`指向刚刚拷贝到undo log链中的旧版本记录，根据`DB_ROLL_PTR`可形成一个undo log的回滚记录链表
+- 将修改后的记录写入redo log
+
+当系统判断当前已经没有事务再用到这些回滚日志时，会对其进行删除，所以尽量不要使用**长事务**，长事务意味着系统里面会存在很老的事务视图。由于这些事务随时可能访问数据库里面的任何数据，所以这个事务提交之前，数据库里面它可能用到的回滚记录都必须保留，这就会导致大量占用存储空间。
+
+#### Read View（读视图）
+
+事务在启动时会生成read view，记录当前活跃事务的信息
+
+- `trx_ids`，Read View创建时其他未提交的活跃事务ID列表
+- `low_limit_id`，目前出现过的最大的事务ID+1，即下一个将被分配的事务ID
+- `up_limit_id`，trx_ids中最小的事务ID，当trx_ids列表为空，则up_limit_id=low_limit_id
+- `creator_trx_id`，当前事务ID
+
+因为trx_ids中的事务编号是逆序的，所以最大的事务ID+1在最左边为low，最小的事务ID在最右边为up
+
+Read View将所有事务分为了几种情况
+
+![img](https://static001.geekbang.org/resource/image/88/5e/882114aaf55861832b4270d44507695e.png)
+
+当前事务在读取一个数据行时，根据Read View来判断该数据行对事务的可见性，该数据行最新的事务ID为trx_id
+
+- trx_id < up_limit_id，表示该数据版本在创建Read View时就已提交，可见
+- trx_id >= low_limit_id，表示该数据版本在创建Read View后更新的，不可见，随后取undo log中的上一个版本，重新判断
+- up_limit_id <= trx_id < low_limit_id，表示更新该数据版本的事务在创建Read View时可能处于活跃或已提交状态，需要进一步根据trx_ids中查找来判断
+  - 该数据版本中的事务ID就是trx_id，说明是自己修改的，可见
+  - 在trx_ids中有，但不是自己的trx_id，说明该版本是由还没提交的事务生成的，不可见，从undo log中找上一个版本，重新判断
+  - 在trx_ids中没有，说明该版本是已经提交了的事务生成的，可见
+
+#### 可重复读与读已提交
+
+- 在可重复读隔离级别下，只需要在事务开始的时候创建一致性视图，之后事务里的其他查询都共用这个一致性视图，所以解决了不可重复读的问题
+- 在读已提交隔离级别下，每一条语句执行前都会重新算出一个新的视图。
+
+#### 快照读与当前读
+
+**快照读**
+
+普通select语句读取数据时，实际读取到的值为Read View模式下可见性的值，称为快照读
+
+**当前读**
+
+- insert、update、delete、select ... lock in share mode、select ... for update读取到的数据为当前最新的值，称为当前读
+- 当前读会加锁
+- 注意：虽然MVCC模式下不同事务之间读取到的数据可能不一样，但是在执行上述触发当前读的语句时，读取的值都是最新值，**比如一个事务中，先执行select，后执行update，select时查询到的不一定是最新值，但是update一定是在最新值上操作的**
+- 在串行化隔离级别下，所有操作都是当前读
+
+### 锁
+
+#### 全局锁
+
+`Flush tables with read lock`，给整个数据库实例加上读锁，使整个库处于只读状态，用作全库备份
+
+#### 表级锁
+
+**主动锁表**
+
+- `lock tables … read/write`，主动给表加读/写锁
+- 加锁后读锁只与读锁兼容，其他读写、写写锁之间都是互斥的
+- 锁表的线程只能在其锁住的表上操作加的锁操作，如线程A在表1上加了读锁，则线程A只能读表1，不允许写表1或操作其他表
+
+**元数据锁 metadata lock**
+
+- MySQL5.5后引入了metadata lock（MDL），在增删改查时MySQL会主动加读锁，对表结构做变更会加写锁
+- Server层实现
+- 读锁之间不互斥，读写、写写锁之间互斥
+- **长事务**如果不提交就会一直占用MDL锁，从而可能阻塞其他的事务
+
+**意向锁 Intention lock**  
+
+- InnoDB引擎独有，引擎层实现，用于快速判断表里是否有记录被加锁
+- 事务在给行数据加共享锁（S锁）之前，会先给表加上意向共享锁（IS锁）
+- 事务在给行数据加排他锁（X锁）之前，会先给表加上意向排他锁（IX锁）
+- 意向锁是表锁，且**不会与行锁互斥**，意向锁之间是兼容的，意向锁与表锁之间的兼容性如下：
+
+| 是否兼容         | 表读锁（S） | 表写锁（X） |
+| ---------------- | ----------- | ----------- |
+| 意向共享锁（IS） | √           | ×           |
+| 意向排他锁（IX） | ×           | ×           |
+
+
+
+#### 行级锁
+
+**两段锁协议**
+
+- 加锁阶段，在对任何数据进行读、写操作之前，首先要申请并获得该数据的锁，若没获取到则进入阻塞状态，直到加锁成功
+- 解锁阶段，事务在释放第一个锁之后进入解锁阶段，此阶段事务只能解锁，不能再进行加锁操作
+
+**共享锁与排他锁**
+
+- 共享锁/读锁/S锁，事务对行数据加上共享锁后，其他事务也可以再对这些行数据加共享锁，但不能加排他锁，获取共享锁的事务只能读数据，不能写数据
+- 排他锁/写锁/X锁，事务对行数据加上排他锁后，其他事务不能再对这些行数据加任何类型的锁，获取排他锁的事务可以读数据，也可以写数据
+- 普通`select`语句不会加任何锁
+- `insert`、`update`、`delete` 会自动给涉及到的数据加排他锁
+- `select ... lock in share mode` 会加共享锁
+- `select ... for update `会加排他锁
+
+##### **加锁分析**
+
+https://www.aneasystone.com/archives/2017/12/solving-dead-locks-three.html
+
+- **锁是加在索引上的，在行记录上加锁则是锁住聚簇索引**，所以锁是加在索引上的
+- **所有会访问到的对象都会加锁**（全表扫描的时候会给所有行数据加锁）
+- 先加next-key lock，next-key lock区间为左开右闭
+- 在等值查询的情况下，next-key lock会进行优化
+  - 最右侧值不满足查询条件，next-key lock退化为gap lock
+  - 唯一索引查询命中的情况下，next-key lock退化为行锁
+- next-key lock由gap lock和行锁组成，加next-key lock时会先加gap lock，再加行锁
+
+
+
+![students-table.png](https://www.aneasystone.com/usr/uploads/2017/11/1845259072.png)
+
+**主键索引等值查询（命中）**
+
+- `UPDATE students SET score = 100 WHERE id = 15`
+- 主键加行锁
+
+![primary-index-locks.png](https://www.aneasystone.com/usr/uploads/2017/11/3772354388.png)
+
+**主键索引等值查询（未命中）**
+
+- `UPDATE students SET score = 100 WHERE id = 16`
+
+- 先加next-key lock，(15, 18]，因为最右侧的值 !=16，不满足查询条件，next-key lock退化为gap lock
+![primary-index-locks-gap.png](https://www.aneasystone.com/usr/uploads/2017/11/1134815826.png)
+
+**普通索引等值查询（命中）**
+
+- `UPDATE students SET score = 100 WHERE name = 'Tom'`
+- 加next-key lock，左右间隙都会锁住，包括(Rose|50, Tom|37]、(Tom|37, Tom|49]、(Tom|49, x|y)，Tom|49与右边的next-key lock会退化成gap lock，图上右边的值没画出来，这里有x|y代替
+- 因为**访问到的对象都会被锁住**，所以在唯一索引上加锁后，**还会给行记录加上行锁**
+- 如果用`select ... lock in share mode`进行查询，且结果通过覆盖索引就能查询到，无需再回表，则不会再给行记录加锁
+- 但如果用`select ... for update`或`update`语句，系统认为你接下来会进行update操作，则依然会给行记录加锁
+- 如果Tom|49这行的name是其他值比如Wonda，则next-key lock (Tome|39, Wonda|49]会退化成(Tome|39, Wonda|49)
+
+![secondary-index-non-unique-locks.png](https://www.aneasystone.com/usr/uploads/2017/11/412778305.png)
+
+**普通索引等值查询（未命中）**
+
+- `UPDATE students SET score = 100 WHERE name = 'John'`
+- 先加next-key lock，然后退化为gap lock
+![secondary-index-non-unique-locks-gap.png](https://www.aneasystone.com/usr/uploads/2017/11/3618764093.png)
+
+**唯一索引等值查询（命中）**
+
+- `UPDATE students SET score = 100 WHERE no = 'S0003'`
+
+- 先加next-key lock，然后退化成行锁
+- 在等值查询的情况下，插入相同值的记录才会产生幻读，而唯一索引本身就限制了该索引值只能有一条记录，所以在这种情况下next-key lock会退化成行锁
+
+![secondary-index-unique-locks.png](https://www.aneasystone.com/usr/uploads/2017/11/3264452282.png)
+
+**唯一索引等值查询（未命中）**
+
+- `UPDATE students SET score = 100 WHERE name = 'John'`
+- 先加next-key lock，然后最右侧值未命中，退化成gap lock
+
+![secondary-index-non-unique-locks-gap.png](https://www.aneasystone.com/usr/uploads/2017/11/3618764093.png)
+
+**主键索引范围查询**
+
+- `UPDATE students SET score = 100 WHERE id <= 20`
+- 加next-key lock，左右间隙都会锁住，(Infinum, 15]、(15, 18]、(18, 20]、(20, 30]，next-key lock是左开右闭的，所以这里30这行数据也会锁住
+
+![primary-index-range-locks.png](https://www.aneasystone.com/usr/uploads/2017/12/4271695386.png)
+
+- `UPDATE students SET score = 100 WHERE id < 20`
+
+- 搜索到20这行就结束了，所以锁范围是(Infinum, 15]、(15, 18]、(18, 20]
+  - 为什么这里不会给20右边加next-key lock呢？
+- `UPDATE students SET score = 100 WHERE id >= 20`
+- 锁范围为20这行加行锁，其他为next-key lock，(20, 30] 、(30, 37]、...
+  - 为什么这里不会给20左边加next-key lock呢？
+- `UPDATE students SET score = 100 WHERE id > 20`
+- next-key lock，(20, 30] 、(30, 37]、...
+
+**普通索引范围查询**
+
+- `UPDATE students SET score = 100 WHERE age <= 23`
+
+- 左右都会加next-key lock，**且会在命中的行记录上加行锁**，(Infinum, 22]、(22, 23]、(23, 23]、(23, 24]
+
+![secondary-index-range-locks.png](https://www.aneasystone.com/usr/uploads/2017/12/4209323709.png)
+
+- `UPDATE students SET score = 100 WHERE age < 23`
+- 跟<=23时一样，(Infinum, 22]、(22, 23]、(23, 23]、(23, 24]
+
+- `UPDATE students SET score = 100 WHERE age >= 23`
+- 左右加next-key lock，(22, 23]、(23, 23]、(23, 24]
+- `UPDATE students SET score = 100 WHERE age > 23`
+- 右侧加next-key lock，(23, 23]、(23, 24]、...
+
+**唯一索引范围查询**
+
+- `UPDATE students SET score = 100 WHERE id <= 30`
+- 左右加next-key lock，且会在行记录上加行锁，下面的图只用以示意，没有完整画出索引与行记录
+
+![primary-index-range-locks.png](https://www.aneasystone.com/usr/uploads/2017/12/4271695386.png)
+
+- `UPDATE students SET score = 100 WHERE id < 30`
+- 左边加next-key lock，并锁住行记录
+- `UPDATE students SET score = 100 WHERE id >= 30`
+- 左右next-key lock，并锁住行记录
+- `UPDATE students SET score = 100 WHERE id > 30`
+- 右边加next-key locks，并锁住行记录
+
+**范围查询时的边界锁问题**
+
+| 查询范围\索引类型   | 主键索引 | 普通索引 | 唯一索引 |
+| ------------------- | -------- | -------- | -------- |
+| <= n，右边是否加锁  | √        | √        | √        |
+| < n，右边是否加锁   | ×        | √        | ×        |
+| \>= n，左边是否加锁 | ×        | √        | √        |
+| \> n，左边是否加锁  | ×        | ×        | ×        |
+
+**limit锁优化**
+
+在范围或等值查询时，定义了limit n，若在部分锁住的空间内能够满足n条数据的要求，则会优化多余的锁
+
+- `select * from user where id <= '20' limit 3 for update;`
+- 数据如下图所示，理论上会在20左右都加next-key lock，但是20左侧有三条数据可以满足limit 3的要求，所以20右侧的锁会被优化掉，在这个limit n例子里，n <= 3都会触发优化
+- `select * from user where id <= '20' limit 4 for update;`
+- limit n定义的n数量，超过了20左侧的行数，所以20右侧的锁依然会保留
+
+![primary-index-range-locks.png](https://www.aneasystone.com/usr/uploads/2017/12/4271695386.png)
+
+**无索引**
+
+- `UPDATE students SET score = 100 WHERE score = 22`
+- 无索引时，根据聚簇索引进行全表扫描，会给所有的行记录和gap加锁
+- 在RC级别下，MySQL没有gap锁，会先加行锁，再对不满足条件的行记录解锁，使得最后只有满足条件的行加锁，但这违反了两段锁协议
+- RR级别下，可以通过设置`innodb_locks_unsafe_for_binlog` 参数，达到和RC一样的效果
+
+![no-index-locks.png](https://www.aneasystone.com/usr/uploads/2017/11/3641345061.png)
+
+##### 死锁
+
+两个或两个以上的进程在执行过程中，因争夺资源而造成的一种互相等待的现象
+
+**出现场景**
+
+- 循环等待
+
+![img](https://static001.geekbang.org/resource/image/4d/52/4d0eeec7b136371b79248a0aed005a52.jpg)
+
+- gap锁导致死锁
+
+不同的事务可以对同一个gap加锁而不互斥，导致可能出现事务A对gap加锁后，事务B也对该gap加锁，然后事务A等待事务B的gap lock，事务B等待事务A的gap lock，从而出现死锁
+
+```sql
+Session1:
+select * from t3 where id=22 for update;
+Empty set (0.00 sec)
+未命中，加gap锁
+
+session2:
+select * from t3 where id=23  for update;
+Empty set (0.00 sec)
+未命中，加gap锁
+
+Session1:
+insert into t3 values(22,'ac','a',now());
+锁等待中……
+
+Session2:
+insert into t3 values(23,'bc','b',now());
+ERROR 1213 (40001): Deadlock found when trying to get lock; try restarting transaction
+```
+
+其他的场景都是类似的，循环等待导致出现死锁
+
+**处理策略**
+
+- 自动等待超时，`innodb_lock_wait_timeout `参数配置锁等待超时时间，默认50s，即一把锁到达超时时间就自动解锁
+  - 超时时间太长，业务难以接受，超时时间太短，可能会将正常的锁等待解开，导致业务有损
+
+- 死锁检测，`innodb_deadlock_detect` 参数设置是否进行死锁检测，默认为on，一旦发现死锁则主动回滚死锁链条中的一个事务，让其他事务继续进行
+  - 每个进入等待的线程，都要判断自身的加入会不会出现死锁，这个检查操作需要消耗CPU资源，可能导致CPU利用很高，而事务执行很慢
+  - `SHOW ENGINE INNODB STATUS `命令查询死锁日志，进行死锁问题排查
+  - 推荐使用这种方式，因为检测到死锁会回滚事务，业务无损，业务可以不断重试直至执行完成
+
+**预防策略**
+
+- 如果事务中需要锁多个行，把最可能造成锁冲突、最可能影响并发度的锁尽量往后放，因为行锁在事务提交时释放，尽量减少锁持有的时间
+- 优化加锁顺序，不同事务有次序地加锁
+- 优化索引，让查询扫描更少的索引记录，减少死锁出现的概率
+- 控制并发度，相同行的更新请求在进入引擎前排队
+
+## Online DDL
+
+MySQL中进行DDL（对表、视图、索引等进行create、alter、drop等操作）总共有三种算法：`copy`，`inplace`，`instant`
+
+### copy
+
+MySQL最早使用的方式（MySQL 5.5及之前的版本），**以重建表为例**
+
+- 新建与原表A结构相同的临时表tmp_table
+- 原表A加锁，只允许读操作
+- 按照主键顺序将数据拷贝到tmp_table
+- 表A锁升级，禁止读写
+- 重命名，以tmp_table替换表A
+
+![img](https://static001.geekbang.org/resource/image/02/cd/02e083adaec6e1191f54992f7bc13dcd.png)
+
+### inplace
+
+copy方式是offline的，即在copy期间无法进行增删改的操作，在MySQL 5.6之后引入了online ddl，即inplace
+
+>  MySQL 5.6开始引入，但功能不健全，5.7进行了优化
+
+- 新建临时文件tmp_file
+- 原表A加MDL写锁
+- MDL写锁降级为读锁，允许增删改查
+- 扫描表A的数据，拷贝到tmp_file
+- 拷贝数据的过程中，对表A的操作都记录在一个日志文件log_file中
+- 拷贝数据完成后，MDL读锁升级为写锁
+- 将log_file中的操作应用到tmp_file上
+- 重命名，以tmp_file替换表A的数据文件
+
+copy方式中使用到的tmp_table是在server层创建的，而inplace的tmp_file是在InnoDB引擎层创建的，整个DDL都是在InnoDB内部完成，对于server层而言，并没有挪动表的操作，所以叫inplace
+
+> inplace并不是完全是online的，inplace创建全文索引（FULLTEXT index）和空间索引（SPATIAL index）就是offline的，offline的inplace DDL操作，执行方式跟online是一样的，只是执行期间不能进行增删改查。
+
+![img](https://static001.geekbang.org/resource/image/2d/f0/2d1cfbbeb013b851a56390d38b5321f0.png)
+
+### instant
+
+instant是MySQL 8.0.12引入的，只能支持部分DDL
+
+- Adding a column. This feature is referred to as Instant Add Column . 添加列
+
+- Adding or dropping a virtual column. 添加或删除virtual 列
+
+- Adding or dropping a column default value. 添加或删除列默认值
+
+- Modifying the definition of an ENUM.  修改 ENUM 定义
+
+- Changing the index type. 修改索引类型
+
+- Renaming a table. 重命名表
+
+通过修改数据库表元数据来快速实现DDL的效果
+
+https://opensource.actionsky.com/20190620-mysql-add-column/
+
+## explain
