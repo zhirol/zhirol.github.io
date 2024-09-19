@@ -19,7 +19,7 @@ remote_theme: sighingnow/jekyll-gitbook
 toc:
   enabled: true
   h_min:   1
-  h_max:   3
+  h_max:   6
 
 # customize the link favicon in header, will be {{site.baseurl}}/{{site.favicon_path}}
 favicon_path:     /assets/gitbook/images/favicon.ico
@@ -36,7 +36,7 @@ kramdown:
   syntax_highlighter_opts:
     guess_lang:           true
 
-syntax_highlighter_style: colorful
+syntax_highlighter_style: github
 
 markdown_ext:             markdown,mkdown,mkdn,mkd,md
 
@@ -50,10 +50,22 @@ exclude:
   - _drafts
 
 collections:
-  Java:
+  basic:
     output: true
     permalink: /:collection/:path/
-  DB:
+  framework:
+    output: true
+    permalink: /:collection/:path/
+  database:
+    output: true
+    permalink: /:collection/:path/
+  distributed:
+    output: true
+    permalink: /:collection/:path/
+  system-design:
+    output: true
+    permalink: /:collection/:path/
+  gaps:
     output: true
     permalink: /:collection/:path/
 #  pages:
@@ -65,8 +77,12 @@ collections:
 
 ordered_collections:
   - posts
-  - Java
-  - DB
+  - basic
+  - framework
+  - database
+  - distributed
+  - system-design
+  - gaps
 #  - pages
 #  - others
 
