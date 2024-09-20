@@ -96,6 +96,3 @@ plugins:
   - jekyll-feed
   - jekyll-readme-index
   - jemoji
-
-tracker:
-  google_analytics: "G-218HHR3HKD"
