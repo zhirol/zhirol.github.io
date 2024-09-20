@@ -1,7 +1,16 @@
 <!DOCTYPE HTML>
 <html lang="en" >
     <head>
-
+		<!-- Google tag (gtag.js) -->
+		<script async src="https://www.googletagmanager.com/gtag/js?id=G-218HHR3HKD"></script>
+		<script>
+		window.dataLayer = window.dataLayer || [];
+		function gtag(){dataLayer.push(arguments);}
+		gtag('js', new Date());
+		
+		gtag('config', 'G-218HHR3HKD');
+		</script>
+	
         {%- include head.html -%}
 
         {% if page.previous %}
@@ -63,14 +72,5 @@
 
         {%- include footer.html -%}
 
-		<!-- Google tag (gtag.js) -->
-		<script async src="https://www.googletagmanager.com/gtag/js?id=G-218HHR3HKD"></script>
-		<script>
-		window.dataLayer = window.dataLayer || [];
-		function gtag(){dataLayer.push(arguments);}
-		gtag('js', new Date());
-		
-		gtag('config', 'G-218HHR3HKD');
-		</script>
     </body>
 </html>
