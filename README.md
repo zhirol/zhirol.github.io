@@ -2,6 +2,7 @@
 layout: home
 title: Irol Gitbook
 permalink: /
+cover: /assets/headimg.jpg
 ---
 
 日常学习，程序员进阶
